@@ -1,12 +1,12 @@
 /**
  * Copyright (c) 2010 - 2016 Yahoo! Inc., 2016, 2019 YCSB contributors. All rights reserved.
- *
+ * <p>
  * Licensed under the Apache License, Version 2.0 (the "License"); you
  * may not use this file except in compliance with the License. You
  * may obtain a copy of the License at
- *
+ * <p>
  * http://www.apache.org/licenses/LICENSE-2.0
- *
+ * <p>
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
@@ -16,17 +16,13 @@
  */
 package site.ycsb.db;
 
-import site.ycsb.DB;
-import site.ycsb.DBException;
-import site.ycsb.ByteIterator;
-import site.ycsb.Status;
-import site.ycsb.StringByteIterator;
+import site.ycsb.*;
+import site.ycsb.db.flavors.DBFlavor;
 
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import site.ycsb.db.flavors.DBFlavor;
 
 /**
  * A class that wraps a JDBC compliant database to allow it to be interfaced
@@ -141,7 +137,25 @@ public class JdbcDBClient extends DB {
    * @return Connection object
    */
   private Connection getShardConnectionByKey(String key) {
-    return conns.get(getShardIndexByKey(key));
+    int index = getShardIndexByKey(key);
+    Connection conn = conns.get(index);
+    try {
+      if (conn.isClosed()) {
+        props = getProperties();
+        String urls = props.getProperty(CONNECTION_URL, DEFAULT_PROP);
+        final String[] urlArr = urls.split(";");
+        String url = urlArr[index];
+        String user = props.getProperty(CONNECTION_USER, DEFAULT_PROP);
+        String passwd = props.getProperty(CONNECTION_PASSWD, DEFAULT_PROP);
+        conn = DriverManager.getConnection(url, user, passwd);
+        conn.setAutoCommit(autoCommit);
+        conns.set(index, conn);
+        System.out.println("Reconnected to shard node URL: " + url);
+      }
+    } catch (SQLException ex) {
+      System.err.println("Error in reconnecting to database: " + ex);
+    }
+    return conn;
   }
 
   private void cleanupAllConnections() throws SQLException {
@@ -283,7 +297,7 @@ public class JdbcDBClient extends DB {
     String insert = dbFlavor.createInsertStatement(insertType, key);
     PreparedStatement insertStatement = getShardConnectionByKey(key).prepareStatement(insert);
     PreparedStatement stmt = cachedStatements.putIfAbsent(insertType, insertStatement);
-    if (stmt == null) {
+    if (stmt == null || stmt.isClosed()) {
       return insertStatement;
     }
     return stmt;
@@ -294,7 +308,7 @@ public class JdbcDBClient extends DB {
     String read = dbFlavor.createReadStatement(readType, key);
     PreparedStatement readStatement = getShardConnectionByKey(key).prepareStatement(read);
     PreparedStatement stmt = cachedStatements.putIfAbsent(readType, readStatement);
-    if (stmt == null) {
+    if (stmt == null || stmt.isClosed()) {
       return readStatement;
     }
     return stmt;
@@ -305,7 +319,7 @@ public class JdbcDBClient extends DB {
     String delete = dbFlavor.createDeleteStatement(deleteType, key);
     PreparedStatement deleteStatement = getShardConnectionByKey(key).prepareStatement(delete);
     PreparedStatement stmt = cachedStatements.putIfAbsent(deleteType, deleteStatement);
-    if (stmt == null) {
+    if (stmt == null || stmt.isClosed()) {
       return deleteStatement;
     }
     return stmt;
@@ -316,7 +330,7 @@ public class JdbcDBClient extends DB {
     String update = dbFlavor.createUpdateStatement(updateType, key);
     PreparedStatement insertStatement = getShardConnectionByKey(key).prepareStatement(update);
     PreparedStatement stmt = cachedStatements.putIfAbsent(updateType, insertStatement);
-    if (stmt == null) {
+    if (stmt == null || stmt.isClosed()) {
       return insertStatement;
     }
     return stmt;
@@ -330,7 +344,7 @@ public class JdbcDBClient extends DB {
       scanStatement.setFetchSize(this.jdbcFetchSize);
     }
     PreparedStatement stmt = cachedStatements.putIfAbsent(scanType, scanStatement);
-    if (stmt == null) {
+    if (stmt == null || stmt.isClosed()) {
       return scanStatement;
     }
     return stmt;
@@ -341,7 +355,7 @@ public class JdbcDBClient extends DB {
     try {
       StatementType type = new StatementType(StatementType.Type.READ, tableName, 1, "", getShardIndexByKey(key));
       PreparedStatement readStatement = cachedStatements.get(type);
-      if (readStatement == null) {
+      if (readStatement == null || readStatement.isClosed()) {
         readStatement = createAndCacheReadStatement(type, key);
       }
       readStatement.setString(1, key);
@@ -370,14 +384,14 @@ public class JdbcDBClient extends DB {
     try {
       StatementType type = new StatementType(StatementType.Type.SCAN, tableName, 1, "", getShardIndexByKey(startKey));
       PreparedStatement scanStatement = cachedStatements.get(type);
-      if (scanStatement == null) {
+      if (scanStatement == null || scanStatement.isClosed()) {
         scanStatement = createAndCacheScanStatement(type, startKey);
       }
       // SQL Server TOP syntax is at first
       if (sqlserverScans) {
         scanStatement.setInt(1, recordcount);
         scanStatement.setString(2, startKey);
-      // FETCH FIRST and LIMIT are at the end
+        // FETCH FIRST and LIMIT are at the end
       } else {
         scanStatement.setString(1, startKey);
         scanStatement.setInt(2, recordcount);
@@ -409,11 +423,11 @@ public class JdbcDBClient extends DB {
       StatementType type = new StatementType(StatementType.Type.UPDATE, tableName,
           numFields, fieldInfo.getFieldKeys(), getShardIndexByKey(key));
       PreparedStatement updateStatement = cachedStatements.get(type);
-      if (updateStatement == null) {
+      if (updateStatement == null || updateStatement.isClosed()) {
         updateStatement = createAndCacheUpdateStatement(type, key);
       }
       int index = 1;
-      for (String value: fieldInfo.getFieldValues()) {
+      for (String value : fieldInfo.getFieldValues()) {
         updateStatement.setString(index++, value);
       }
       updateStatement.setString(index, key);
@@ -436,7 +450,7 @@ public class JdbcDBClient extends DB {
       StatementType type = new StatementType(StatementType.Type.INSERT, tableName,
           numFields, fieldInfo.getFieldKeys(), getShardIndexByKey(key));
       PreparedStatement insertStatement = cachedStatements.get(type);
-      if (insertStatement == null) {
+      if (insertStatement == null || insertStatement.isClosed()) {
         insertStatement = createAndCacheInsertStatement(type, key);
       }
       insertStatement.setString(1, key);
@@ -501,7 +515,7 @@ public class JdbcDBClient extends DB {
     try {
       StatementType type = new StatementType(StatementType.Type.DELETE, tableName, 1, "", getShardIndexByKey(key));
       PreparedStatement deleteStatement = cachedStatements.get(type);
-      if (deleteStatement == null) {
+      if (deleteStatement == null || deleteStatement.isClosed()) {
         deleteStatement = createAndCacheDeleteStatement(type, key);
       }
       deleteStatement.setString(1, key);
